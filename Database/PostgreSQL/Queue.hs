@@ -51,6 +51,7 @@ createTableQuery =
   \  q_name text NOT NULL CHECK(length(q_name) > 0),\n\
   \  method text NOT NULL CHECK(length(method) > 0),\n\
   \  args json NOT NULL,\n\
+  \  status VARCHAR,\n\
   \  locked_at timestamptz,\n\
   \  locked_by integer,\n\
   \  created_at timestamptz DEFAULT now()\n\
@@ -84,6 +85,7 @@ createFunctionsQuery =
   \  EXECUTE 'SELECT count(*) FROM '\n\
   \    || '(SELECT * FROM queue_classic_jobs '\n\
   \    || ' WHERE locked_at IS NULL'\n\
+  \    || ' AND status IS NULL'\n\
   \    || ' AND q_name = '\n\
   \    || quote_literal(q_name)\n\
   \    || ' LIMIT '\n\
@@ -102,6 +104,7 @@ createFunctionsQuery =
   \    BEGIN\n\
   \      EXECUTE 'SELECT id FROM queue_classic_jobs '\n\
   \        || ' WHERE locked_at IS NULL'\n\
+  \        || ' AND status IS NULL'\n\
   \        || ' AND q_name = '\n\
   \        || quote_literal(q_name)\n\
   \        || ' ORDER BY id ASC'\n\
@@ -186,7 +189,7 @@ runCount :: Connection -> Maybe BC.ByteString -> IO Int
 runCount con mName = do
   let q = "SELECT COUNT(*) FROM queue_classic_jobs"
       q' = "SELECT COUNT(*) FROM queue_classic_jobs \
-           \WHERE q_name = ?"
+           \WHERE status IS NULL && q_name = ?"
   [Only r] <- case mName of
                 Nothing -> query_ con q
                 Just name -> query con q' [name]
@@ -198,6 +201,20 @@ delete = runDeleteJob
 runDeleteJob :: Connection -> Int -> IO ()
 runDeleteJob con i =
   execute con "DELETE FROM queue_classic_jobs where id = ?" [i] >> return ()
+
+markFailed :: Connection -> Int -> IO ()
+markFailed = runMarkFailedJob
+
+runMarkFailedJob :: Connection -> Int -> IO ()
+runMarkFailedJob con i =
+  execute con "UPDATE queue_classic_jobs set status='failed' where id = ?" [i] >> return ()
+
+markDone :: Connection -> Int -> IO ()
+markDone = runDoneJob
+
+runDoneJob :: Connection -> Int -> IO ()
+runDoneJob con i =
+  execute con "UPDATE queue_classic_jobs set status='done' where id = ?" [i] >> return ()
 
 deleteAll :: Connection -> Maybe Queue -> IO ()
 deleteAll con mqueue = case mqueue of
@@ -309,10 +326,11 @@ lockJob con Worker{..} = do
 
 process :: Connection -> Worker -> (Int, BC.ByteString, Value) -> IO ()
 process con w job@(i, method, arguments) =
-  catch (call w job) handleException >> delete con i
+  catch (call w job >> markDone con i) handleException
   where
   handleException :: SomeException -> IO ()
   handleException e = do
+    markFailed con i
     putStrLn $ "An exception occured while processing the job #" ++ show i ++ "."
     putStrLn $ "  - method: " ++ show method
     putStrLn $ "  - argument: " ++ show arguments
