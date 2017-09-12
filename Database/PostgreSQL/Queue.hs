@@ -148,6 +148,7 @@ createFunctionsQuery =
   \create trigger queue_classic_notify\n\
   \after insert on queue_classic_jobs\n\
   \for each row\n\
+  \when (new.status is null)\n\
   \execute procedure queue_classic_notify();\n\
   \ "
 
